@@ -1,25 +1,33 @@
 '''
 Date: 2024-03-31 20:20:21
 LastEditors: wurh2022 z02014268@stu.ahu.edu.cn
-LastEditTime: 2024-04-05 00:44:42
+LastEditTime: 2024-04-05 18:01:59
 FilePath: \Bearing_prediction\predict.py
 Description: Do not edit
 '''
 
-from audioop import rms
-import csv
+from cgi import test
 import os
+import csv
+import random
+
 import numpy as np
 import pandas as pd
-from torch.utils.data import Dataset, DataLoader
 
+from torch.utils.data import Dataset, DataLoader, random_split
+
+
+
+# 轴承数据集类
 class Bearing_Dataset(Dataset):
     def __init__(self, bearing_path):
         self.bearing_path = bearing_path
         self.subfiles = os.listdir(bearing_path)
-        # pass
+        self.length = len(self.subfiles)
+        
     def __len__(self):
-        return len(self.subfiles)
+        return self.length
+    
     def __getitem__(self, idx):
         subfile = self.subfiles[idx]
         subfile_name = os.path.join(self.bearing_path, subfile)
@@ -40,6 +48,10 @@ class Bearing_Dataset(Dataset):
             data['time'] = time
             # 删去原有的时间数据，只保留时间戳
             bearing_data = bearing_data.drop(['hour', 'minute', 'second', 'micro'], axis=1)
+            bearing_data = self.calculate_data(bearing_data)
+            rul = idx / self.length * 100
+            # bearing_data中增加剩余寿命列
+            bearing_data['RUL'] = rul
         return bearing_data
     
     def calculate_data(self, data):
@@ -71,6 +83,11 @@ class Bearing_Dataset(Dataset):
         margin_factor = peak_value / rmsa
         # 能量
         energy = np.sum(data['Horizontal_acceleration'] ** 2)
+
+        # 构建时域特征向量
+        time_domain_feature = [peak_value, rms_value, variance, rectified_mean, 
+                                        peak_to_peak_value, rmsa, kurtosis_value, skewness_value, 
+                                        waveform_factor, peak_factor, impulse_factor, margin_factor, energy]
 
         '''===================频域特征========================='''
 
@@ -104,11 +121,54 @@ class Bearing_Dataset(Dataset):
 
         # 计算中心频率
         f_median = np.sum(f * fft_amp) / np.sum(fft_amp)
+
+        # 构建频域特征向量
+        frequency_domain_feature = [f_mean, f_max, f_rms, f_std, f_median]
         
         '''===================时频域特征========================='''
 
         '''-------------------------------离散小波变换---------------------------------------------'''
         
+
+        return time_domain_feature, frequency_domain_feature
+
+
+# 数据加载器
+def bearing_dataloader(bearing_path, batch_size):
+    bearing_dataset = Bearing_Dataset(bearing_path)    
+    bearing_dataloader = DataLoader(bearing_dataset, batch_size=batch_size, shuffle=False, num_workers=4)
+    # 划分训练集和测试集
+    train_size = int(0.8 * len(bearing_dataset))
+    test_size = len(bearing_dataset) - train_size
+    split_size = [train_size, test_size]
+    train_dataset, test_dataset = random_split(bearing_dataset, split_size)
+
+    # 创建训练集加载器
+    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=4)
+
+    # 创建测试集加载器
+    test_dataloader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=4)
+
+    return train_dataloader, test_dataloader
+
+
+# 轴承寿命预测模型
+class Bearing_Predictor():
+    # 初始化函数实现加载数据集和数据加载器
+    def __init__(self, bearing_path, batch_size):
+        self.bearing_path = bearing_path
+        self.batch_size = batch_size
+        self.bearing_dataloader = bearing_dataloader(self.bearing_path, self.batch_size)
+    
+    # 
+    def predict(self):
+        for data in self.bearing_dataloader:
+            time_domain_feature, frequency_domain_feature = self.calculate_data(data)
+            # 进行预测
+            # ...
+            # 返回预测结果
+            return prediction
+
 
 def get_data(bearing_path):
     total_data = []
