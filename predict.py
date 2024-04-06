@@ -1,7 +1,7 @@
 '''
 Date: 2024-03-31 20:20:21
 LastEditors: wurh2022 z02014268@stu.ahu.edu.cn
-LastEditTime: 2024-04-05 18:01:59
+LastEditTime: 2024-04-06 23:19:51
 FilePath: \Bearing_prediction\predict.py
 Description: Do not edit
 '''
@@ -13,9 +13,11 @@ import random
 
 import numpy as np
 import pandas as pd
+from torch import embedding
+import torch.nn as nn
 
 from torch.utils.data import Dataset, DataLoader, random_split
-
+# from torch.nn import Transformer
 
 
 # 轴承数据集类
@@ -153,14 +155,38 @@ def bearing_dataloader(bearing_path, batch_size):
 
 
 # 轴承寿命预测模型
-class Bearing_Predictor():
-    # 初始化函数实现加载数据集和数据加载器
-    def __init__(self, bearing_path, batch_size):
-        self.bearing_path = bearing_path
-        self.batch_size = batch_size
-        self.bearing_dataloader = bearing_dataloader(self.bearing_path, self.batch_size)
-    
-    # 
+class Bearing_Predictor(nn.model, nn.Transformer):
+    # 初始化函数搭建transformer网络
+    def __init__(self, feature_dim, embedding_dim, num_heads, num_encoder_layers, num_decoder_layers, dim_feedforward, dropout, activation):
+        # super(Bearing_Predictor, self).__init__()
+        # 调用父类的初始化函数
+        nn.model.__init__(self)
+        nn.Transformer.__init__(self, d_model=embedding_dim, nhead=num_heads, num_encoder_layers=num_encoder_layers, num_decoder_layers=num_decoder_layers, dim_feedforward=dim_feedforward, dropout=dropout, activation=activation)
+        self.model_type = 'Transformer'
+        self.src_mask = None
+        self.pos_encoder = None
+        # embedding层用于将输入的特征进行更深层次的抽象
+        self.input_embedding = nn.Embedding(feature_dim, embedding_dim=embedding_dim)
+        # 编码层使用transformerencoder，解码层使用简单的全连接层
+        # TODO: 使用transformer解码层
+        self.decoder = nn.Squential(nn.Linear(feature_dim, feature_dim),
+                                    nn.ReLU(),
+                                    nn.Linear(feature_dim, feature_dim))
+        
+        self.init_weights()
+
+    def init_weights(self):
+        initrange = 0.1
+        nn.init.uniform_(self.input_embedding.weight, -initrange, initrange)
+        nn.init.zeros_(self.decoder[0].bias)
+        nn.init.zeros_(self.decoder[2].bias)
+        nn.init.uniform_(self.decoder[0].weight, -initrange, initrange)
+        nn.init.uniform_(self.decoder[2].weight, -initrange, initrange)
+        
+        # self.decoder.apply(self._init_weights)
+
+
+    # 使用transformer网络进行轴承寿命预测
     def predict(self):
         for data in self.bearing_dataloader:
             time_domain_feature, frequency_domain_feature = self.calculate_data(data)
