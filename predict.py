@@ -1,20 +1,19 @@
 '''
 Date: 2024-03-31 20:20:21
 LastEditors: wurh2022 z02014268@stu.ahu.edu.cn
-LastEditTime: 2024-04-06 23:19:51
+LastEditTime: 2024-04-07 23:58:45
 FilePath: \Bearing_prediction\predict.py
 Description: Do not edit
 '''
 
-from cgi import test
 import os
 import csv
-import random
 
 import numpy as np
 import pandas as pd
-from torch import embedding
+import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from torch.utils.data import Dataset, DataLoader, random_split
 # from torch.nn import Transformer
@@ -52,9 +51,9 @@ class Bearing_Dataset(Dataset):
             bearing_data = bearing_data.drop(['hour', 'minute', 'second', 'micro'], axis=1)
             bearing_data = self.calculate_data(bearing_data)
             rul = idx / self.length * 100
-            # bearing_data中增加剩余寿命列
-            bearing_data['RUL'] = rul
-        return bearing_data
+            rul = torch.tensor(rul)
+            # bearing_data = torch.cat((bearing_data, rul), 0)
+        return bearing_data, rul
     
     def calculate_data(self, data):
         # 通过data计算特征
@@ -131,8 +130,12 @@ class Bearing_Dataset(Dataset):
 
         '''-------------------------------离散小波变换---------------------------------------------'''
         
-
-        return time_domain_feature, frequency_domain_feature
+        # 将数据类型转换为张量
+        time_domain_feature = torch.tensor(time_domain_feature)
+        frequency_domain_feature = torch.tensor(frequency_domain_feature)
+        # 将时域特征和频域特征拼接成一个特征向量
+        features_vetor = torch.cat((time_domain_feature, frequency_domain_feature), 0)
+        return features_vetor
 
 
 # 数据加载器
@@ -140,18 +143,18 @@ def bearing_dataloader(bearing_path, batch_size):
     bearing_dataset = Bearing_Dataset(bearing_path)    
     bearing_dataloader = DataLoader(bearing_dataset, batch_size=batch_size, shuffle=False, num_workers=4)
     # 划分训练集和测试集
-    train_size = int(0.8 * len(bearing_dataset))
-    test_size = len(bearing_dataset) - train_size
-    split_size = [train_size, test_size]
-    train_dataset, test_dataset = random_split(bearing_dataset, split_size)
+    # train_size = int(0.8 * len(bearing_dataset))
+    # test_size = len(bearing_dataset) - train_size
+    # split_size = [train_size, test_size]
+    # train_dataset, test_dataset = random_split(bearing_dataset, split_size)
 
     # 创建训练集加载器
-    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=4)
+    # train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=4)
 
     # 创建测试集加载器
-    test_dataloader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=4)
+    # test_dataloader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=4)
 
-    return train_dataloader, test_dataloader
+    return bearing_dataloader
 
 
 # 轴承寿命预测模型
@@ -170,8 +173,9 @@ class Bearing_Predictor(nn.model, nn.Transformer):
         # 编码层使用transformerencoder，解码层使用简单的全连接层
         # TODO: 使用transformer解码层
         self.decoder = nn.Squential(nn.Linear(feature_dim, feature_dim),
-                                    nn.ReLU(),
-                                    nn.Linear(feature_dim, feature_dim))
+                                    # nn.ReLU(),
+                                    nn.Linear(feature_dim, 1),
+                                    nn.Sigmoid())
         
         self.init_weights()
 
@@ -182,18 +186,50 @@ class Bearing_Predictor(nn.model, nn.Transformer):
         nn.init.zeros_(self.decoder[2].bias)
         nn.init.uniform_(self.decoder[0].weight, -initrange, initrange)
         nn.init.uniform_(self.decoder[2].weight, -initrange, initrange)
-        
-        # self.decoder.apply(self._init_weights)
+
+    def forward(self, src, has_mask=True):
+        if has_mask:
+            if self.src_mask is None or self.src_mask.size(0) != len(src):
+                device = src.device
+                mask = self.generate_square_subsequent_mask(len(src)).to(device)
+                self.src_mask = mask
+        src = self.input_embedding(src)
+        output = self.encoder(src, self.src_mask)
+        output = self.decoder(output)
+        # return F.log_softmax(output, dim=-1)
+        return output
 
 
-    # 使用transformer网络进行轴承寿命预测
-    def predict(self):
-        for data in self.bearing_dataloader:
-            time_domain_feature, frequency_domain_feature = self.calculate_data(data)
-            # 进行预测
-            # ...
-            # 返回预测结果
-            return prediction
+# 模型前向传播
+def model_forward(batch, model, criterion, device):
+    features, rul = batch
+    features = features.to(device)
+    rul = rul.to(device)
+    output = model(features)
+    loss = criterion(output, rul)
+    accuracy = output - rul
+
+    return loss, accuracy
+
+
+# 训练模型
+def train_model(model, train_dataloader, criterion, optimizer, device, epochs):
+    model.to(device)
+    for epoch in range(epochs):
+        model.train()
+        total_loss = 0
+        total_accuracy = 0
+        for batch in train_dataloader:
+            optimizer.zero_grad()
+            loss, accuracy = model_forward(batch, model, criterion, device)
+            loss.backward()
+            optimizer.step()
+            total_loss += loss.item()
+            total_accuracy += accuracy.item()
+        print('Epoch: %d, Loss: %.4f, Accuracy: %.4f' % (epoch, total_loss, total_accuracy))
+        test_loss, test_accuracy = evaluate_model(model, test_dataloader, criterion, device)
+        print('Test Loss: %.4f, Test Accuracy: %.4f' % (test_loss, test_accuracy))
+
 
 
 def get_data(bearing_path):
