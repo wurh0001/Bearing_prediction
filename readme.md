@@ -1,7 +1,7 @@
 <!--
  * @Date: 2024-03-22 22:39:53
  * @LastEditors: wurh2022 z02014268@stu.ahu.edu.cn
- * @LastEditTime: 2024-04-07 00:09:30
+ * @LastEditTime: 2024-04-08 00:12:37
  * @FilePath: \Bearing_prediction\readme.md
  * @Description:  
 -->
@@ -19,7 +19,8 @@
 
 #### 2024年4月7日
 > 完成了基本的数据集的处理，但是在搭建模型时遇到问题，torch的transformer模型怎么用？最终选择了最基础的transformer模型，使用到编码器部分，解码器用一个全连接层代替
-
+#### 2024年4月8日
+> 尝试写模型的前向传播和训练代码，对于epoch、step、batch_size等参数有了新的认识，一般来说使用epoch来进行迭代训练，每个epoch包含多个step，每个step包含多个batch_size，每个batch_size包含多个样本，每个样本包含多个特征。一个batch可以批量的输入到模型，这是不需要迭代的
 ### 数据处理
 
 
