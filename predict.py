@@ -1,7 +1,7 @@
 '''
 Date: 2024-03-31 20:20:21
 LastEditors: wurh2022 z02014268@stu.ahu.edu.cn
-LastEditTime: 2024-04-07 23:58:45
+LastEditTime: 2024-04-09 20:27:31
 FilePath: \Bearing_prediction\predict.py
 Description: Do not edit
 '''
@@ -16,7 +16,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from torch.utils.data import Dataset, DataLoader, random_split
-# from torch.nn import Transformer
+from tqdm import tqdm, trange
 
 
 # 轴承数据集类
@@ -45,13 +45,18 @@ class Bearing_Dataset(Dataset):
             bearing_data['micro'] = bearing_data['micro'].astype('float32')
             bearing_data['Horizontal_acceleration'] = bearing_data['Horizontal_acceleration'].astype('float32')
             bearing_data['Vertical_acceleration'] = bearing_data['Vertical_acceleration'].astype('float32')
-            time = pd.to_timedelta(data['hour'], unit='h') + pd.to_timedelta(data['minute'], unit='m') + pd.to_timedelta(data['second'], unit='s') + pd.to_timedelta(data['micro'], unit='us')
-            data['time'] = time
+            time = pd.to_timedelta(bearing_data['hour'], unit='h') + pd.to_timedelta(bearing_data['minute'], unit='m') + pd.to_timedelta(bearing_data['second'], unit='s') + pd.to_timedelta(bearing_data['micro'], unit='us')
+            bearing_data['time'] = time
             # 删去原有的时间数据，只保留时间戳
             bearing_data = bearing_data.drop(['hour', 'minute', 'second', 'micro'], axis=1)
             bearing_data = self.calculate_data(bearing_data)
-            rul = idx / self.length * 100
+            # print(bearing_data)
+            # 对特征进行normalization操作       - 选用均值和方差进行归一化
+            bearing_data = (bearing_data - bearing_data.mean()) / bearing_data.std()
+            rul = idx / self.length
             rul = torch.tensor(rul)
+            # 
+            # print(bearing_data.shape, rul.shape)
             # bearing_data = torch.cat((bearing_data, rul), 0)
         return bearing_data, rul
     
@@ -158,22 +163,23 @@ def bearing_dataloader(bearing_path, batch_size):
 
 
 # 轴承寿命预测模型
-class Bearing_Predictor(nn.model, nn.Transformer):
+class Bearing_Predictor(nn.Transformer):
     # 初始化函数搭建transformer网络
-    def __init__(self, feature_dim, embedding_dim, num_heads, num_encoder_layers, num_decoder_layers, dim_feedforward, dropout, activation):
+    def __init__(self, feature_dim, embedding_dim, num_heads, num_encoder_layers, dim_feedforward, dropout):
         # super(Bearing_Predictor, self).__init__()
         # 调用父类的初始化函数
-        nn.model.__init__(self)
-        nn.Transformer.__init__(self, d_model=embedding_dim, nhead=num_heads, num_encoder_layers=num_encoder_layers, num_decoder_layers=num_decoder_layers, dim_feedforward=dim_feedforward, dropout=dropout, activation=activation)
+        # nn.Model.__init__(self)
+        nn.Transformer.__init__(self, d_model=feature_dim, nhead=num_heads, num_encoder_layers=num_encoder_layers, 
+                                        dim_feedforward=dim_feedforward, dropout=dropout, batch_first=True)
         self.model_type = 'Transformer'
         self.src_mask = None
         self.pos_encoder = None
+        self.prenet = nn.Linear(feature_dim, feature_dim)
         # embedding层用于将输入的特征进行更深层次的抽象
-        self.input_embedding = nn.Embedding(feature_dim, embedding_dim=embedding_dim)
+        # self.input_embedding = nn.Embedding(feature_dim, embedding_dim=embedding_dim)
         # 编码层使用transformerencoder，解码层使用简单的全连接层
         # TODO: 使用transformer解码层
-        self.decoder = nn.Squential(nn.Linear(feature_dim, feature_dim),
-                                    # nn.ReLU(),
+        self.decoder = nn.Sequential(nn.Linear(feature_dim, feature_dim),
                                     nn.Linear(feature_dim, 1),
                                     nn.Sigmoid())
         
@@ -181,33 +187,45 @@ class Bearing_Predictor(nn.model, nn.Transformer):
 
     def init_weights(self):
         initrange = 0.1
-        nn.init.uniform_(self.input_embedding.weight, -initrange, initrange)
+        # nn.init.uniform_(self.input_embedding.weight, -initrange, initrange)
         nn.init.zeros_(self.decoder[0].bias)
-        nn.init.zeros_(self.decoder[2].bias)
+        nn.init.zeros_(self.decoder[1].bias)
         nn.init.uniform_(self.decoder[0].weight, -initrange, initrange)
-        nn.init.uniform_(self.decoder[2].weight, -initrange, initrange)
+        nn.init.uniform_(self.decoder[1].weight, -initrange, initrange)
 
-    def forward(self, src, has_mask=True):
+    def forward(self, src, has_mask=False):
         if has_mask:
             if self.src_mask is None or self.src_mask.size(0) != len(src):
                 device = src.device
                 mask = self.generate_square_subsequent_mask(len(src)).to(device)
                 self.src_mask = mask
-        src = self.input_embedding(src)
-        output = self.encoder(src, self.src_mask)
-        output = self.decoder(output)
+        # src = self.input_embedding(src)
+        out = self.prenet(src)
+        out = out.permute(1, 0, 2)
+        output = self.encoder(out, self.src_mask)
+        output = output.transpose(0, 1)
+        stats = output.mean(dim=1)
+        output = self.decoder(stats)
         # return F.log_softmax(output, dim=-1)
         return output
 
 
 # 模型前向传播
-def model_forward(batch, model, criterion, device):
-    features, rul = batch
+def model_forward(features, rul, model, criterion, device):
+    # features, rul = batch
+    features = features.float()  # 将输入数据转换为Float类型
+    # 特征为4x18的张量，将其转换为4x1x18的张量
+    features = features.view(features.size(0), 1, features.size(1))
+    # print("一个批次中特征的维度：", features.shape)
+    # 更改rul的形状为4x1x1
+    rul = rul.view(rul.size(0), 1, 1)
+    # print(rul.shape)
     features = features.to(device)
     rul = rul.to(device)
     output = model(features)
     loss = criterion(output, rul)
-    accuracy = output - rul
+    # 计算精度
+    accuracy = (output - rul).abs() .float().mean()
 
     return loss, accuracy
 
@@ -217,45 +235,74 @@ def train_model(model, train_dataloader, criterion, optimizer, device, epochs):
     model.to(device)
     for epoch in range(epochs):
         model.train()
-        total_loss = 0
-        total_accuracy = 0
-        for batch in train_dataloader:
-            optimizer.zero_grad()
-            loss, accuracy = model_forward(batch, model, criterion, device)
+        # total_loss = 0
+        # total_accuracy = 0
+        loop = tqdm((train_dataloader), total=len(train_dataloader))
+        for src, rul in loop:
+            # 前向传播
+            loss, accuracy = model_forward(src, rul, model, criterion, device)
+            batch_loss = loss.item()
+            batch_accuracy = accuracy.item()
+            # 反向传播
             loss.backward()
+            # 更新
             optimizer.step()
+            optimizer.zero_grad()
+            # total_loss += loss.item()
+            # total_accuracy += accuracy.mean().item()
+            loop.set_description(f'Epoch: 【{epoch}/{epochs}】')
+            loop.set_postfix(loss=batch_loss, accuracy=batch_accuracy)
+
+        # print('Epoch: %d, Loss: %.4f, Accuracy: %.4f' % (epoch, total_loss, total_accuracy))
+        # test_loss, test_accuracy = evaluate_model(model, test_dataloader, criterion, device)
+        # print('Test Loss: %.4f, Test Accuracy: %.4f' % (test_loss, test_accuracy))
+
+
+# 评估模型
+def evaluate_model(model, test_dataloader, criterion, device):
+    model.eval()
+    total_loss = 0
+    total_accuracy = 0
+    with torch.no_grad():
+        for batch in test_dataloader:
+            loss, accuracy = model_forward(batch, model, criterion, device)
             total_loss += loss.item()
             total_accuracy += accuracy.item()
-        print('Epoch: %d, Loss: %.4f, Accuracy: %.4f' % (epoch, total_loss, total_accuracy))
-        test_loss, test_accuracy = evaluate_model(model, test_dataloader, criterion, device)
-        print('Test Loss: %.4f, Test Accuracy: %.4f' % (test_loss, test_accuracy))
+    return total_loss, total_accuracy
 
 
+def main():
+    # 超参数
+    batch_size = 32
+    embedding_dim = 256
+    num_heads = 2
+    num_encoder_layers = 6
+    dim_feedforward = 256
+    dropout = 0.1
+    # activation = 'relu'
+    epochs = 10
+    lr = 0.00000001
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-def get_data(bearing_path):
-    total_data = []
-    subfiles = os.listdir(bearing_path)
-    for subfile in subfiles:
-        subfile_name = os.path.join(bearing_path, subfile)
-        if os.path.isfile(subfile_name):
-            print(subfile_name)
-            data = []
-            with open(subfile_name, 'r') as data_file:
-                data_reader = csv.reader(data_file, delimiter=',')
-                for row in data_reader:
-                    data.append(row)
-                bearing_columns = ['hour', 'minute', 'second', 'micro', 'Horizontal_acceleration', 'Vertical_acceleration']
-                bearing_data = pd.DataFrame(data, columns=bearing_columns)
-                bearing_data['hour'] = bearing_data['hour'].astype('int16')
-                bearing_data['minute'] = bearing_data['minute'].astype('int16')
-                bearing_data['second'] = bearing_data['second'].astype('int16')
-                bearing_data['micro'] = bearing_data['micro'].astype('float32')
-                bearing_data['Horizontal_acceleration'] = bearing_data['Horizontal_acceleration'].astype('float32')
-                bearing_data['Vertical_acceleration'] = bearing_data['Vertical_acceleration'].astype('float32')
-                time = pd.to_timedelta(data['hour'], unit='h') + pd.to_timedelta(data['minute'], unit='m') + pd.to_timedelta(data['second'], unit='s') + pd.to_timedelta(data['micro'], unit='us')
-                data['time'] = time
-                # 删去原有的时间数据，只保留时间戳
-                bearing_data = bearing_data.drop(['hour', 'minute', 'second', 'micro'], axis=1)
-            total_data.append(bearing_data)
-    return total_data
+    # 数据集路径
+    bearing_path = 'phm-ieee-2012-data-challenge-dataset-master\Learning_set\Bearing1_1'
 
+    # 加载数据集
+    v_bearing_dataloader = bearing_dataloader(bearing_path, batch_size)
+
+    # 模型初始化
+    model = Bearing_Predictor(feature_dim=18, embedding_dim=embedding_dim, num_heads=num_heads, 
+                                        num_encoder_layers=num_encoder_layers, dim_feedforward=dim_feedforward, 
+                                        dropout=dropout)
+
+    # 损失函数
+    criterion = nn.MSELoss()
+
+    # 优化器
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+
+    # 训练模型
+    train_model(model, v_bearing_dataloader, criterion, optimizer, device, epochs)    
+
+if __name__ == '__main__':
+    main()
