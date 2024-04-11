@@ -1,7 +1,7 @@
 '''
 Date: 2024-03-31 20:20:21
 LastEditors: wurh2022 z02014268@stu.ahu.edu.cn
-LastEditTime: 2024-04-09 20:27:31
+LastEditTime: 2024-04-11 23:40:46
 FilePath: \Bearing_prediction\predict.py
 Description: Do not edit
 '''
@@ -30,35 +30,50 @@ class Bearing_Dataset(Dataset):
         return self.length
     
     def __getitem__(self, idx):
-        subfile = self.subfiles[idx]
-        subfile_name = os.path.join(self.bearing_path, subfile)
-        data = []
-        with open(subfile_name, 'r') as data_file:
-            data_reader = csv.reader(data_file, delimiter=',')
-            for row in data_reader:
-                data.append(row)
-            bearing_columns = ['hour', 'minute', 'second', 'micro', 'Horizontal_acceleration', 'Vertical_acceleration']
-            bearing_data = pd.DataFrame(data, columns=bearing_columns)
-            bearing_data['hour'] = bearing_data['hour'].astype('int16')
-            bearing_data['minute'] = bearing_data['minute'].astype('int16')
-            bearing_data['second'] = bearing_data['second'].astype('int16')
-            bearing_data['micro'] = bearing_data['micro'].astype('float32')
-            bearing_data['Horizontal_acceleration'] = bearing_data['Horizontal_acceleration'].astype('float32')
-            bearing_data['Vertical_acceleration'] = bearing_data['Vertical_acceleration'].astype('float32')
-            time = pd.to_timedelta(bearing_data['hour'], unit='h') + pd.to_timedelta(bearing_data['minute'], unit='m') + pd.to_timedelta(bearing_data['second'], unit='s') + pd.to_timedelta(bearing_data['micro'], unit='us')
-            bearing_data['time'] = time
-            # 删去原有的时间数据，只保留时间戳
-            bearing_data = bearing_data.drop(['hour', 'minute', 'second', 'micro'], axis=1)
-            bearing_data = self.calculate_data(bearing_data)
-            # print(bearing_data)
-            # 对特征进行normalization操作       - 选用均值和方差进行归一化
-            bearing_data = (bearing_data - bearing_data.mean()) / bearing_data.std()
-            rul = idx / self.length
-            rul = torch.tensor(rul)
-            # 
-            # print(bearing_data.shape, rul.shape)
-            # bearing_data = torch.cat((bearing_data, rul), 0)
-        return bearing_data, rul
+        # 数据形状为batch_size x 5 x 18
+        # 取五个时间序列数据为一个步长
+        subfiles = self.subfiles[idx:idx+10]
+        bearing_data_sequence = []
+        rul_sequence = []
+        i = 0
+        for subfile in subfiles:
+            subfile_name = os.path.join(self.bearing_path, subfile)
+            data = []
+            with open(subfile_name, 'r') as data_file:
+                data_reader = csv.reader(data_file, delimiter=',')
+                for row in data_reader:
+                    data.append(row)
+                bearing_columns = ['hour', 'minute', 'second', 'micro', 'Horizontal_acceleration', 'Vertical_acceleration']
+                bearing_data = pd.DataFrame(data, columns=bearing_columns)
+                bearing_data['hour'] = bearing_data['hour'].astype('int16')
+                bearing_data['minute'] = bearing_data['minute'].astype('int16')
+                bearing_data['second'] = bearing_data['second'].astype('int16')
+                bearing_data['micro'] = bearing_data['micro'].astype('float32')
+                bearing_data['Horizontal_acceleration'] = bearing_data['Horizontal_acceleration'].astype('float32')
+                bearing_data['Vertical_acceleration'] = bearing_data['Vertical_acceleration'].astype('float32')
+                time = pd.to_timedelta(bearing_data['hour'], unit='h') + pd.to_timedelta(bearing_data['minute'], unit='m') + pd.to_timedelta(bearing_data['second'], unit='s') + pd.to_timedelta(bearing_data['micro'], unit='us')
+                bearing_data['time'] = time
+                # 删去原有的时间数据，只保留时间戳
+                bearing_data = bearing_data.drop(['hour', 'minute', 'second', 'micro'], axis=1)
+                bearing_data = self.calculate_data(bearing_data)
+                # print(bearing_data)
+                # 对特征进行normalization操作       - 选用均值和方差进行归一化
+                bearing_data = (bearing_data - bearing_data.mean()) / bearing_data.std()
+                rul = (idx + i) / self.length
+                i += 1
+                # 
+                # print(bearing_data.shape, rul.shape)
+                # bearing_data = torch.cat((bearing_data, rul), 0)
+            bearing_data_sequence.append(bearing_data)
+            rul_sequence.append(rul)
+        bearing_data_sequence = np.stack(bearing_data_sequence, axis=0)
+        bearing_data_sequence = torch.tensor(bearing_data_sequence)
+        # 将bearing_data_sequence由float64转换为float32
+        bearing_data_sequence = bearing_data_sequence.float()
+        rul_sequence = torch.tensor(rul_sequence)
+        # rul转换为5x1的张量
+        # rul_sequence = rul_sequence.view(rul_sequence.size(0), 1)
+        return bearing_data_sequence, rul_sequence
     
     def calculate_data(self, data):
         # 通过data计算特征
@@ -146,7 +161,7 @@ class Bearing_Dataset(Dataset):
 # 数据加载器
 def bearing_dataloader(bearing_path, batch_size):
     bearing_dataset = Bearing_Dataset(bearing_path)    
-    bearing_dataloader = DataLoader(bearing_dataset, batch_size=batch_size, shuffle=False, num_workers=4)
+    bearing_dataloader = DataLoader(bearing_dataset, batch_size=batch_size, shuffle=False, num_workers=4, drop_last=True)
     # 划分训练集和测试集
     # train_size = int(0.8 * len(bearing_dataset))
     # test_size = len(bearing_dataset) - train_size
@@ -163,25 +178,30 @@ def bearing_dataloader(bearing_path, batch_size):
 
 
 # 轴承寿命预测模型
-class Bearing_Predictor(nn.Transformer):
+class Bearing_Predictor(nn.Module):
     # 初始化函数搭建transformer网络
     def __init__(self, feature_dim, embedding_dim, num_heads, num_encoder_layers, dim_feedforward, dropout):
-        # super(Bearing_Predictor, self).__init__()
+        super().__init__()
         # 调用父类的初始化函数
         # nn.Model.__init__(self)
-        nn.Transformer.__init__(self, d_model=feature_dim, nhead=num_heads, num_encoder_layers=num_encoder_layers, 
-                                        dim_feedforward=dim_feedforward, dropout=dropout, batch_first=True)
+        # nn.Transformer.__init__(self, d_model=feature_dim, nhead=num_heads, num_encoder_layers=num_encoder_layers, 
+        #                                 dim_feedforward=dim_feedforward, dropout=dropout, batch_first=True)
         self.model_type = 'Transformer'
         self.src_mask = None
-        self.pos_encoder = None
+        # self.pos_encoder = None
         self.prenet = nn.Linear(feature_dim, feature_dim)
         # embedding层用于将输入的特征进行更深层次的抽象
         # self.input_embedding = nn.Embedding(feature_dim, embedding_dim=embedding_dim)
         # 编码层使用transformerencoder，解码层使用简单的全连接层
+        self.encoderlayer = nn.TransformerEncoderLayer(d_model=feature_dim, nhead=num_heads, dim_feedforward=dim_feedforward, dropout=dropout)
+        self.encoder = nn.TransformerEncoder(self.encoderlayer, num_layers=num_encoder_layers)
         # TODO: 使用transformer解码层
         self.decoder = nn.Sequential(nn.Linear(feature_dim, feature_dim),
-                                    nn.Linear(feature_dim, 1),
-                                    nn.Sigmoid())
+                                    nn.ReLU(),
+                                    nn.Linear(feature_dim, 10),
+                                    # nn.Linear(10, 1),
+                                    # nn.Sigmoid()
+                                    )
         
         self.init_weights()
 
@@ -189,9 +209,9 @@ class Bearing_Predictor(nn.Transformer):
         initrange = 0.1
         # nn.init.uniform_(self.input_embedding.weight, -initrange, initrange)
         nn.init.zeros_(self.decoder[0].bias)
-        nn.init.zeros_(self.decoder[1].bias)
+        # nn.init.zeros_(self.decoder[1].bias)
         nn.init.uniform_(self.decoder[0].weight, -initrange, initrange)
-        nn.init.uniform_(self.decoder[1].weight, -initrange, initrange)
+        # nn.init.uniform_(self.decoder[1].weight, -initrange, initrange)
 
     def forward(self, src, has_mask=False):
         if has_mask:
@@ -213,12 +233,12 @@ class Bearing_Predictor(nn.Transformer):
 # 模型前向传播
 def model_forward(features, rul, model, criterion, device):
     # features, rul = batch
-    features = features.float()  # 将输入数据转换为Float类型
+    # features = features.float()  # 将输入数据转换为Float类型
     # 特征为4x18的张量，将其转换为4x1x18的张量
-    features = features.view(features.size(0), 1, features.size(1))
+    # features = features.view(features.size(0), 1, features.size(1))
     # print("一个批次中特征的维度：", features.shape)
-    # 更改rul的形状为4x1x1
-    rul = rul.view(rul.size(0), 1, 1)
+    # 更改rul的形状为batch_sizex5x1
+    rul = rul.view(rul.size(0), 1, rul.size(1))
     # print(rul.shape)
     features = features.to(device)
     rul = rul.to(device)
@@ -233,7 +253,7 @@ def model_forward(features, rul, model, criterion, device):
 # 训练模型
 def train_model(model, train_dataloader, criterion, optimizer, device, epochs):
     model.to(device)
-    for epoch in range(epochs):
+    for epoch in range(epochs):         
         model.train()
         # total_loss = 0
         # total_accuracy = 0
@@ -273,7 +293,7 @@ def evaluate_model(model, test_dataloader, criterion, device):
 
 def main():
     # 超参数
-    batch_size = 32
+    batch_size = 16
     embedding_dim = 256
     num_heads = 2
     num_encoder_layers = 6
@@ -281,7 +301,7 @@ def main():
     dropout = 0.1
     # activation = 'relu'
     epochs = 10
-    lr = 0.00000001
+    lr = 0.0001
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     # 数据集路径
