@@ -1,11 +1,12 @@
 '''
 Date: 2024-03-31 20:20:21
 LastEditors: wurh2022 z02014268@stu.ahu.edu.cn
-LastEditTime: 2024-04-11 23:40:46
+LastEditTime: 2024-04-12 12:46:02
 FilePath: \Bearing_prediction\predict.py
 Description: Do not edit
 '''
 
+from inspect import stack
 import os
 import csv
 
@@ -59,20 +60,23 @@ class Bearing_Dataset(Dataset):
                 # print(bearing_data)
                 # 对特征进行normalization操作       - 选用均值和方差进行归一化
                 bearing_data = (bearing_data - bearing_data.mean()) / bearing_data.std()
+                bearing_data = torch.tensor(bearing_data)
                 rul = (idx + i) / self.length
                 i += 1
                 # 
                 # print(bearing_data.shape, rul.shape)
                 # bearing_data = torch.cat((bearing_data, rul), 0)
             bearing_data_sequence.append(bearing_data)
+            # bearing_data_sequence = torch.tensor(bearing_data_sequence)
             rul_sequence.append(rul)
-        bearing_data_sequence = np.stack(bearing_data_sequence, axis=0)
-        bearing_data_sequence = torch.tensor(bearing_data_sequence)
+        # bearing_data_sequence = np.stack(bearing_data_sequence, axis=0)
+        bearing_data_sequence = torch.stack(bearing_data_sequence, axis=0)
+        # bearing_data_sequence = torch.tensor(bearing_data_sequence)
         # 将bearing_data_sequence由float64转换为float32
         bearing_data_sequence = bearing_data_sequence.float()
         rul_sequence = torch.tensor(rul_sequence)
         # rul转换为5x1的张量
-        # rul_sequence = rul_sequence.view(rul_sequence.size(0), 1)
+        rul_sequence = rul_sequence.view(rul_sequence.size(0), 1)
         return bearing_data_sequence, rul_sequence
     
     def calculate_data(self, data):
@@ -193,12 +197,12 @@ class Bearing_Predictor(nn.Module):
         # embedding层用于将输入的特征进行更深层次的抽象
         # self.input_embedding = nn.Embedding(feature_dim, embedding_dim=embedding_dim)
         # 编码层使用transformerencoder，解码层使用简单的全连接层
-        self.encoderlayer = nn.TransformerEncoderLayer(d_model=feature_dim, nhead=num_heads, dim_feedforward=dim_feedforward, dropout=dropout)
+        self.encoderlayer = nn.TransformerEncoderLayer(d_model=feature_dim, nhead=num_heads, dim_feedforward=dim_feedforward, dropout=dropout, batch_first=True)
         self.encoder = nn.TransformerEncoder(self.encoderlayer, num_layers=num_encoder_layers)
         # TODO: 使用transformer解码层
         self.decoder = nn.Sequential(nn.Linear(feature_dim, feature_dim),
                                     nn.ReLU(),
-                                    nn.Linear(feature_dim, 10),
+                                    nn.Linear(feature_dim, 1),
                                     # nn.Linear(10, 1),
                                     # nn.Sigmoid()
                                     )
@@ -224,8 +228,8 @@ class Bearing_Predictor(nn.Module):
         out = out.permute(1, 0, 2)
         output = self.encoder(out, self.src_mask)
         output = output.transpose(0, 1)
-        stats = output.mean(dim=1)
-        output = self.decoder(stats)
+        # stats = output.mean(dim=1)
+        output = self.decoder(output)
         # return F.log_softmax(output, dim=-1)
         return output
 
@@ -237,8 +241,8 @@ def model_forward(features, rul, model, criterion, device):
     # 特征为4x18的张量，将其转换为4x1x18的张量
     # features = features.view(features.size(0), 1, features.size(1))
     # print("一个批次中特征的维度：", features.shape)
-    # 更改rul的形状为batch_sizex5x1
-    rul = rul.view(rul.size(0), 1, rul.size(1))
+    # 更改rul的形状为batch_sizex10x1
+    # rul = rul.view(rul.size(0), 1, rul.size(1))
     # print(rul.shape)
     features = features.to(device)
     rul = rul.to(device)
@@ -250,29 +254,46 @@ def model_forward(features, rul, model, criterion, device):
     return loss, accuracy
 
 
+# 绘制损失和精度曲线
+def show_loss_accuracy(loss, accuracy):
+    import matplotlib.pyplot as plt
+    plt.figure()
+    plt.plot(loss, label='Loss')
+    plt.plot(accuracy, label='Accuracy')
+    plt.legend()
+    # plt.show()
+    # 保存图片
+    plt.savefig('loss_accuracy.png')
+
+
 # 训练模型
 def train_model(model, train_dataloader, criterion, optimizer, device, epochs):
     model.to(device)
     for epoch in range(epochs):         
         model.train()
-        # total_loss = 0
-        # total_accuracy = 0
+        total_loss = []
+        total_accuracy = []
         loop = tqdm((train_dataloader), total=len(train_dataloader))
-        for src, rul in loop:
-            # 前向传播
-            loss, accuracy = model_forward(src, rul, model, criterion, device)
-            batch_loss = loss.item()
-            batch_accuracy = accuracy.item()
-            # 反向传播
-            loss.backward()
-            # 更新
-            optimizer.step()
-            optimizer.zero_grad()
-            # total_loss += loss.item()
-            # total_accuracy += accuracy.mean().item()
-            loop.set_description(f'Epoch: 【{epoch}/{epochs}】')
-            loop.set_postfix(loss=batch_loss, accuracy=batch_accuracy)
-
+        try:
+            for src, rul in loop:
+                # 前向传播
+                loss, accuracy = model_forward(src, rul, model, criterion, device)
+                batch_loss = loss.item()
+                batch_accuracy = accuracy.item()
+                # 反向传播
+                loss.backward()
+                # 更新
+                optimizer.step()
+                optimizer.zero_grad()
+                total_loss.append(loss.item())
+                total_accuracy.append(accuracy.mean().item())
+                loop.set_description(f'Epoch: 【{epoch}/{epochs}】')
+                loop.set_postfix(loss=batch_loss, accuracy=batch_accuracy)
+        except KeyboardInterrupt:
+            show_loss_accuracy(total_loss, total_accuracy)
+            loop.close()
+            raise
+        show_loss_accuracy(total_loss, total_accuracy)
         # print('Epoch: %d, Loss: %.4f, Accuracy: %.4f' % (epoch, total_loss, total_accuracy))
         # test_loss, test_accuracy = evaluate_model(model, test_dataloader, criterion, device)
         # print('Test Loss: %.4f, Test Accuracy: %.4f' % (test_loss, test_accuracy))
