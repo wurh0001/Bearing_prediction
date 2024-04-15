@@ -1,7 +1,7 @@
 '''
 Date: 2024-03-31 20:20:21
 LastEditors: wurh2022 z02014268@stu.ahu.edu.cn
-LastEditTime: 2024-04-12 12:46:02
+LastEditTime: 2024-04-15 20:22:00
 FilePath: \Bearing_prediction\predict.py
 Description: Do not edit
 '''
@@ -60,7 +60,7 @@ class Bearing_Dataset(Dataset):
                 # print(bearing_data)
                 # 对特征进行normalization操作       - 选用均值和方差进行归一化
                 bearing_data = (bearing_data - bearing_data.mean()) / bearing_data.std()
-                bearing_data = torch.tensor(bearing_data)
+                # bearing_data = torch.tensor(bearing_data)
                 rul = (idx + i) / self.length
                 i += 1
                 # 
@@ -70,12 +70,12 @@ class Bearing_Dataset(Dataset):
             # bearing_data_sequence = torch.tensor(bearing_data_sequence)
             rul_sequence.append(rul)
         # bearing_data_sequence = np.stack(bearing_data_sequence, axis=0)
-        bearing_data_sequence = torch.stack(bearing_data_sequence, axis=0)
+        bearing_data_sequence = torch.stack(bearing_data_sequence, dim=0)
         # bearing_data_sequence = torch.tensor(bearing_data_sequence)
         # 将bearing_data_sequence由float64转换为float32
         bearing_data_sequence = bearing_data_sequence.float()
         rul_sequence = torch.tensor(rul_sequence)
-        # rul转换为5x1的张量
+        # rul转换为sequence_lengthx1的张量
         rul_sequence = rul_sequence.view(rul_sequence.size(0), 1)
         return bearing_data_sequence, rul_sequence
     
@@ -223,12 +223,15 @@ class Bearing_Predictor(nn.Module):
                 device = src.device
                 mask = self.generate_square_subsequent_mask(len(src)).to(device)
                 self.src_mask = mask
+        # input/src:(batch_size x seq_len x feature_dim)
         # src = self.input_embedding(src)
         out = self.prenet(src)
+        # 交换维度 batch_size x seq_len x feature_dim -> seq_len x batch_size x feature_dim
         out = out.permute(1, 0, 2)
-        output = self.encoder(out, self.src_mask)
-        output = output.transpose(0, 1)
+        output = self.encoder(out)
+        # output = output.transpose(0, 1)
         # stats = output.mean(dim=1)
+        # output: (seq_len x batch_size x 1)
         output = self.decoder(output)
         # return F.log_softmax(output, dim=-1)
         return output
@@ -246,10 +249,14 @@ def model_forward(features, rul, model, criterion, device):
     # print(rul.shape)
     features = features.to(device)
     rul = rul.to(device)
+    # output形状为batch_size x seq_len x 1
     output = model(features)
+    # 将output形状住转换为batch_size x seq_len x 1
+    # output = output.permute(1, 0, 2)
+    rul = rul.permute(1, 0, 2)
     loss = criterion(output, rul)
     # 计算精度
-    accuracy = (output - rul).abs() .float().mean()
+    accuracy = 1 - ((output - rul).abs() .float().mean())
 
     return loss, accuracy
 
@@ -260,40 +267,62 @@ def show_loss_accuracy(loss, accuracy):
     plt.figure()
     plt.plot(loss, label='Loss')
     plt.plot(accuracy, label='Accuracy')
+    # 设置横坐标和纵坐标的标签
+    plt.xlabel('epoch')
+    plt.ylabel('Loss/Accuracy')
     plt.legend()
     # plt.show()
     # 保存图片
-    plt.savefig('loss_accuracy.png')
+    index = len(os.listdir('./train_info_pic/'))
+    # 检查当前文件夹是否存在
+    if not os.path.exists(f'./train_info_pic/run{index}'):
+        os.makedirs(f'./train_info_pic/run{index}')
+    plt.savefig(f'./train_info_pic/run{index}/loss_accuracy.png')
+    plt.close()
 
 
 # 训练模型
 def train_model(model, train_dataloader, criterion, optimizer, device, epochs):
     model.to(device)
+    total_loss = []
+    total_accuracy = []
     for epoch in range(epochs):         
         model.train()
-        total_loss = []
-        total_accuracy = []
-        loop = tqdm((train_dataloader), total=len(train_dataloader))
-        try:
-            for src, rul in loop:
-                # 前向传播
-                loss, accuracy = model_forward(src, rul, model, criterion, device)
-                batch_loss = loss.item()
-                batch_accuracy = accuracy.item()
-                # 反向传播
-                loss.backward()
-                # 更新
-                optimizer.step()
-                optimizer.zero_grad()
-                total_loss.append(loss.item())
-                total_accuracy.append(accuracy.mean().item())
-                loop.set_description(f'Epoch: 【{epoch}/{epochs}】')
-                loop.set_postfix(loss=batch_loss, accuracy=batch_accuracy)
-        except KeyboardInterrupt:
-            show_loss_accuracy(total_loss, total_accuracy)
-            loop.close()
-            raise
-        show_loss_accuracy(total_loss, total_accuracy)
+        average_loss = []
+        average_acc = []
+        # loop = tqdm((train_dataloader), total=len(train_dataloader))
+        # try:
+        i = 0
+        for src, rul in train_dataloader:
+            # 前向传播
+            loss, accuracy = model_forward(src, rul, model, criterion, device)
+            batch_loss = loss.item()
+            batch_accuracy = accuracy.item()
+            # 反向传播
+            loss.backward()
+            # 更新
+            optimizer.step()
+            optimizer.zero_grad()
+            average_loss.append(loss.item())
+            average_acc.append(accuracy.mean().item())
+            if i % 10 == 0:
+                print('Epoch: %d, Batch num: %d, Loss: %.4f, Accuracy: %.4f' % (epoch, i, batch_loss, batch_accuracy))
+            i += 1
+            # loop.set_description(f'Epoch: 【{epoch}/{epochs}】')
+            # loop.set_postfix(loss=batch_loss, accuracy=batch_accuracy)
+        # average_loss = sum(average_loss) / len(average_loss)
+        # average_acc = sum(average_acc) / len(average_acc)
+        total_loss.append(sum(average_loss) / len(average_loss))
+        total_accuracy.append(sum(average_acc) / len(average_acc))
+
+        # 打印每轮的平均损失和精度
+        print('Epoch: %d, Loss: %.4f, Accuracy: %.4f' % (epoch, total_loss[-1], total_accuracy[-1]))
+        # except:
+            # show_loss_accuracy(average_loss, average_acc)
+            # loop.close()
+            # raise
+            # pass
+    show_loss_accuracy(total_loss, total_accuracy)
         # print('Epoch: %d, Loss: %.4f, Accuracy: %.4f' % (epoch, total_loss, total_accuracy))
         # test_loss, test_accuracy = evaluate_model(model, test_dataloader, criterion, device)
         # print('Test Loss: %.4f, Test Accuracy: %.4f' % (test_loss, test_accuracy))
@@ -314,7 +343,7 @@ def evaluate_model(model, test_dataloader, criterion, device):
 
 def main():
     # 超参数
-    batch_size = 16
+    batch_size = 32
     embedding_dim = 256
     num_heads = 2
     num_encoder_layers = 6
@@ -340,10 +369,15 @@ def main():
     criterion = nn.MSELoss()
 
     # 优化器
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
 
     # 训练模型
     train_model(model, v_bearing_dataloader, criterion, optimizer, device, epochs)    
+
+    # 保存模型
+    torch.save(model, 'bearing_predictor.pth')
+
+    
 
 if __name__ == '__main__':
     main()
