@@ -4,3 +4,5 @@ phm-ieee-2012-data-challenge-dataset-master.zip
 .vscode/
 train_info_pic/
 example/
+GPU平台训练结果/
+bearing_predictor.pth
