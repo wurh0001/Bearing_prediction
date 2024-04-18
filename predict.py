@@ -1,16 +1,15 @@
-'''
+"""
 Date: 2024-03-31 20:20:21
 LastEditors: wurh2022 z02014268@stu.ahu.edu.cn
-LastEditTime: 2024-04-16 22:05:53
+LastEditTime: 2024-04-17 17:19:09
 FilePath: \Bearing_prediction\predict.py
 Description:  
-'''
-
+"""
 
 import os
 import csv
-
 import json
+
 import numpy as np
 import pandas as pd
 import torch
@@ -237,20 +236,24 @@ def bearing_dataloader(bearing_path, batch_size, num_workers=8):
 class Bearing_Predictor(nn.Module):
     # 初始化函数搭建transformer网络
     def __init__(
-        self, feature_dim, num_heads, num_encoder_layers, dim_feedforward, dropout
+        self,
+        feature_dim,
+        num_heads,
+        num_encoder_layers,
+        dim_feedforward,
+        dropout,
+        use_decoder=False,
     ):
         super().__init__()
         # 调用父类的初始化函数
-        # nn.Model.__init__(self)
-        # nn.Transformer.__init__(self, d_model=feature_dim, nhead=num_heads, num_encoder_layers=num_encoder_layers,
-        #                                 dim_feedforward=dim_feedforward, dropout=dropout, batch_first=True)
+
         self.model_type = "Transformer"
         self.src_mask = None
         # self.pos_encoder = None
         self.prenet = nn.Linear(feature_dim, feature_dim)
         # embedding层用于将输入的特征进行更深层次的抽象
         # self.input_embedding = nn.Embedding(feature_dim, embedding_dim=embedding_dim)
-        # 编码层使用transformerencoder，解码层使用简单的全连接层
+        # 编码层使用transformerencoderlayer，这是pytorch中的transformer的实现
         self.encoderlayer = nn.TransformerEncoderLayer(
             d_model=feature_dim,
             nhead=num_heads,
@@ -261,14 +264,25 @@ class Bearing_Predictor(nn.Module):
         self.encoder = nn.TransformerEncoder(
             self.encoderlayer, num_layers=num_encoder_layers
         )
-        # TODO: 使用transformer解码层
-        self.decoder = nn.Sequential(
-            nn.Linear(feature_dim, feature_dim),
-            nn.ReLU(),
-            nn.Linear(feature_dim, 1),
-            # nn.Linear(10, 1),
-            # nn.Sigmoid()
-        )
+        # TODO: 使用transformer定义的解码层
+        if use_decoder:
+            self.decoderlayer = nn.TransformerDecoderLayer(
+                d_model=feature_dim,
+                nhead=num_heads,
+                dim_feedforward=dim_feedforward,
+                dropout=dropout,
+                batch_first=True,
+            )
+            self.decoder = nn.TransformerDecoder(
+                self.decoderlayer, num_layers=num_encoder_layers
+            )
+        else:
+            # 使用全连接层作为解码层
+            self.decoder = nn.Sequential(
+                nn.Linear(feature_dim, feature_dim),
+                nn.ReLU(),
+                nn.Linear(feature_dim, 1),
+            )
 
         self.init_weights()
 
@@ -349,14 +363,16 @@ def show_loss_accuracy(loss, accuracy):
 # 评估模型
 def evaluate_model(model, test_dataloader, criterion, device):
     model.eval()
-    eval_loss = 0
-    eval_accuracy = 0
+    average_loss = []
+    average_acc = []
+    # eval_loss = 0
+    # eval_accuracy = 0
     with torch.no_grad():
         for src, rul in test_dataloader:
             loss, accuracy = model_forward(src, rul, model, criterion, device)
-            eval_loss = loss.item()
-            eval_accuracy = accuracy.item()
-    return eval_loss, eval_accuracy
+            average_loss.append(loss.item())
+            average_acc.append(accuracy.item())
+    return sum(average_loss) / len(average_loss), sum(average_acc) / len(average_acc)
 
 
 # 训练模型并评估
